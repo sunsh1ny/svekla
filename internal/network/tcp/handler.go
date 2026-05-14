@@ -12,6 +12,14 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	maxInitialBufferSize = 1024
+
+	responseErrorPrefix       = "ERR: "
+	messageTooLargeResponse   = "message too large"
+	connectionTimeoutResponse = "connection timeout"
+)
+
 type Handler struct {
 	maxMessageSize int
 	idleTimeout    time.Duration
@@ -27,6 +35,13 @@ func NewHandler(
 	s *service.CommandService,
 	logger *zap.Logger,
 ) *Handler {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if maxMessageSize <= 0 {
+		maxMessageSize = maxInitialBufferSize
+	}
+
 	return &Handler{
 		idleTimeout:    idleTimeout,
 		maxMessageSize: maxMessageSize,
@@ -39,94 +54,137 @@ func NewHandler(
 func (h *Handler) Handle(conn net.Conn) {
 	defer conn.Close()
 
-	initialBufSize := h.maxMessageSize
-	if initialBufSize > 1024 {
-		initialBufSize = 1024
-	}
-
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 0, initialBufSize), h.maxMessageSize)
-
-	writer := bufio.NewWriter(conn)
+	scanner := h.newScanner(conn)
+	writer := newResponseWriter(conn, h.idleTimeout)
 
 	for {
-		if h.idleTimeout > 0 {
-			if err := conn.SetReadDeadline(time.Now().Add(h.idleTimeout)); err != nil {
-				h.logger.Error("error setting read deadline", zap.Error(err))
-				return
-			}
+		if err := h.setReadDeadline(conn); err != nil {
+			h.logger.Error("error setting read deadline", zap.Error(err))
+			return
 		}
 
 		if !scanner.Scan() {
-			err := scanner.Err()
-			if err == nil {
-				return
-			}
-
-			if errors.Is(err, bufio.ErrTooLong) {
-				h.logger.Warn("message too large", zap.Int("max_message_size", h.maxMessageSize))
-				if writeErr := h.writeError(conn, writer, "message too large"); writeErr != nil {
-					h.logger.Error("error writing oversize response", zap.Error(writeErr))
-				}
-				return
-			}
-
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				h.logger.Warn("connection idle timeout reached", zap.Duration("idle_timeout", h.idleTimeout))
-				if writeErr := h.writeError(conn, writer, "connection timeout"); writeErr != nil {
-					h.logger.Error("error writing timeout response", zap.Error(writeErr))
-				}
-				return
-			}
-
-			h.logger.Error("error reading message", zap.Error(err))
+			h.handleReadError(scanner.Err(), writer)
 			return
 		}
 
-		line := scanner.Text()
-
-		query, err := h.parser.Parse(line)
-		if err != nil {
-			h.logger.Error("error parsing message", zap.Error(err))
-			if writeErr := h.writeError(conn, writer, err.Error()); writeErr != nil {
-				h.logger.Error("error writing parse error response", zap.Error(writeErr))
-				return
-			}
-			continue
-		}
-
-		result, err := h.service.Execute(query)
-		if err != nil {
-			h.logger.Error("error executing command", zap.Error(err))
-			if writeErr := h.writeError(conn, writer, err.Error()); writeErr != nil {
-				h.logger.Error("error writing execute error response", zap.Error(writeErr))
-				return
-			}
-			continue
-		}
-
-		if err := h.writeLine(conn, writer, result); err != nil {
-			h.logger.Error("error writing result", zap.Error(err))
+		if err := h.handleMessage(scanner.Text(), writer); err != nil {
+			h.logger.Error("error writing response", zap.Error(err))
 			return
 		}
 	}
 }
 
-func (h *Handler) writeError(conn net.Conn, writer *bufio.Writer, message string) error {
-	return h.writeLine(conn, writer, fmt.Sprintf("ERR: %s", message))
+func (h *Handler) newScanner(conn net.Conn) *bufio.Scanner {
+	initialBufferSize := h.initialBufferSize()
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, initialBufferSize), h.maxMessageSize)
+
+	return scanner
 }
 
-func (h *Handler) writeLine(conn net.Conn, writer *bufio.Writer, message string) error {
+func (h *Handler) initialBufferSize() int {
+	if h.maxMessageSize <= 0 {
+		return maxInitialBufferSize
+	}
+
+	if h.maxMessageSize < maxInitialBufferSize {
+		return h.maxMessageSize
+	}
+
+	return maxInitialBufferSize
+}
+
+func (h *Handler) handleMessage(message string, writer *responseWriter) error {
+	query, err := h.parser.Parse(message)
+	if err != nil {
+		h.logger.Error("error parsing message", zap.Error(err))
+		return writer.Error(err.Error())
+	}
+
+	result, err := h.service.Execute(query)
+	if err != nil {
+		h.logger.Error("error executing command", zap.Error(err))
+		return writer.Error(err.Error())
+	}
+
+	return writer.Line(result)
+}
+
+func (h *Handler) handleReadError(err error, writer *responseWriter) {
+	if err == nil {
+		return
+	}
+
+	if errors.Is(err, bufio.ErrTooLong) {
+		h.logger.Warn("message too large", zap.Int("max_message_size", h.maxMessageSize))
+		h.writeTerminalError(writer, messageTooLargeResponse)
+		return
+	}
+
+	if isTimeout(err) {
+		h.logger.Warn("connection idle timeout reached", zap.Duration("idle_timeout", h.idleTimeout))
+		h.writeTerminalError(writer, connectionTimeoutResponse)
+		return
+	}
+
+	h.logger.Error("error reading message", zap.Error(err))
+}
+
+func (h *Handler) writeTerminalError(writer *responseWriter, message string) {
+	if err := writer.Error(message); err != nil {
+		h.logger.Error("error writing error response", zap.Error(err))
+	}
+}
+
+func (h *Handler) setReadDeadline(conn net.Conn) error {
 	if h.idleTimeout > 0 {
-		if err := conn.SetWriteDeadline(time.Now().Add(h.idleTimeout)); err != nil {
-			return err
-		}
+		return conn.SetReadDeadline(time.Now().Add(h.idleTimeout))
 	}
 
-	if _, err := fmt.Fprintln(writer, message); err != nil {
+	return nil
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+type responseWriter struct {
+	conn    net.Conn
+	writer  *bufio.Writer
+	timeout time.Duration
+}
+
+func newResponseWriter(conn net.Conn, timeout time.Duration) *responseWriter {
+	return &responseWriter{
+		conn:    conn,
+		writer:  bufio.NewWriter(conn),
+		timeout: timeout,
+	}
+}
+
+func (w *responseWriter) Error(message string) error {
+	return w.Line(responseErrorPrefix + message)
+}
+
+func (w *responseWriter) Line(message string) error {
+	if err := w.setDeadline(); err != nil {
 		return err
 	}
 
-	return writer.Flush()
+	if _, err := fmt.Fprintln(w.writer, message); err != nil {
+		return err
+	}
+
+	return w.writer.Flush()
+}
+
+func (w *responseWriter) setDeadline() error {
+	if w.timeout <= 0 {
+		return nil
+	}
+
+	return w.conn.SetWriteDeadline(time.Now().Add(w.timeout))
 }

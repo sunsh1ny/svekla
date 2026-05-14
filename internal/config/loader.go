@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,18 +30,55 @@ func Load(path string) (Config, error) {
 }
 
 func validate(cfg Config) error {
-	if cfg.Engine.Type != EngineTypeInMemory {
+	if err := validateEngine(cfg.Engine); err != nil {
+		return err
+	}
+
+	if err := validateNetwork(cfg.Network); err != nil {
+		return err
+	}
+
+	return validateLogging(cfg.Logging)
+}
+
+func validateEngine(cfg EngineConfig) error {
+	if cfg.Type != EngineTypeInMemory {
 		return ErrInvalidEngineType
 	}
 
-	if cfg.Network.Address == "" {
+	return nil
+}
+
+func validateNetwork(cfg NetworkConfig) error {
+	if err := validateAddress(cfg.Address); err != nil {
+		return err
+	}
+
+	if cfg.MaxConnections <= 0 {
+		return ErrInvalidMaxConnections
+	}
+
+	if _, err := cfg.ParsedMaxMessageSizeBytes(); err != nil {
+		return ErrInvalidMaxMessageSize
+	}
+
+	if cfg.IdleTimeout <= 0 {
+		return ErrInvalidIdleTimeout
+	}
+
+	return nil
+}
+
+func validateAddress(address string) error {
+	if address == "" {
 		return ErrInvalidAddress
 	}
 
-	_, p, err := net.SplitHostPort(cfg.Network.Address)
+	_, p, err := net.SplitHostPort(address)
 	if err != nil {
 		return ErrInvalidAddress
 	}
+
 	port, err := strconv.Atoi(p)
 	if err != nil {
 		return ErrInvalidAddress
@@ -50,22 +88,22 @@ func validate(cfg Config) error {
 		return ErrInvalidAddress
 	}
 
-	if cfg.Network.MaxConnections <= 0 {
-		return ErrInvalidMaxConnections
-	}
+	return nil
+}
 
-	_, err = cfg.Network.ParsedMaxMessageSizeBytes()
-	if err != nil {
-		return ErrInvalidMaxMessageSize
-	}
-
-	if cfg.Network.IdleTimeout <= 0 {
-		return ErrInvalidIdleTimeout
-	}
-
-	if cfg.Logging.Level != LogLevelInfo && cfg.Logging.Level != LogLevelError && cfg.Logging.Level != LogLevelDebug {
+func validateLogging(cfg LoggingConfig) error {
+	if !isValidLogLevel(cfg.Level) {
 		return ErrInvalidLogLevel
 	}
 
 	return nil
+}
+
+func isValidLogLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case LogLevelInfo, LogLevelError, LogLevelDebug:
+		return true
+	default:
+		return false
+	}
 }

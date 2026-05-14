@@ -153,6 +153,16 @@ func TestValidate(t *testing.T) {
 			wantErr: ErrInvalidMaxConnections,
 		},
 		{
+			name:    "invalid max message size",
+			cfg:     withConfig(func(cfg *Config) { cfg.Network.MaxMessageSize = "nope" }),
+			wantErr: ErrInvalidMaxMessageSize,
+		},
+		{
+			name:    "invalid idle timeout",
+			cfg:     withConfig(func(cfg *Config) { cfg.Network.IdleTimeout = 0 }),
+			wantErr: ErrInvalidIdleTimeout,
+		},
+		{
 			name:    "invalid log level",
 			cfg:     withConfig(func(cfg *Config) { cfg.Logging.Level = "trace" }),
 			wantErr: ErrInvalidLogLevel,
@@ -170,6 +180,64 @@ func TestValidate(t *testing.T) {
 
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("expected error %v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestParsedMaxMessageSizeBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr error
+	}{
+		{
+			name:  "bytes",
+			input: "8B",
+			want:  8,
+		},
+		{
+			name:  "kilobytes",
+			input: "4KB",
+			want:  4096,
+		},
+		{
+			name:  "megabytes",
+			input: "2MB",
+			want:  2 * 1024 * 1024,
+		},
+		{
+			name:    "missing unit",
+			input:   "100",
+			wantErr: ErrInvalidMaxMessageSize,
+		},
+		{
+			name:    "zero",
+			input:   "0KB",
+			wantErr: ErrInvalidMaxMessageSize,
+		},
+		{
+			name:    "empty",
+			input:   "",
+			wantErr: ErrInvalidMaxMessageSize,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := (NetworkConfig{MaxMessageSize: test.input}).ParsedMaxMessageSizeBytes()
+
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("expected error %v, got %v", test.wantErr, err)
+			}
+
+			if test.wantErr != nil {
+				return
+			}
+
+			if got != test.want {
+				t.Fatalf("got %d, want %d", got, test.want)
 			}
 		})
 	}

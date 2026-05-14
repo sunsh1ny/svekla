@@ -15,6 +15,13 @@ type Server struct {
 }
 
 func NewServer(address string, maxConnections int, h *Handler, logger *zap.Logger) *Server {
+	if maxConnections <= 0 {
+		maxConnections = 1
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	return &Server{
 		address:        address,
 		maxConnections: maxConnections,
@@ -29,6 +36,11 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
+
+	return s.Serve(listener)
+}
+
+func (s *Server) Serve(listener net.Listener) error {
 	defer listener.Close()
 
 	s.logger.Info("tcp server started", zap.String("address", s.address))
@@ -40,22 +52,42 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		select {
-		case s.sem <- struct{}{}:
-			go func() {
-				defer func() {
-					<-s.sem
-
-					if r := recover(); r != nil {
-						s.logger.Error("panic while handling connection", zap.Any("panic", r))
-					}
-				}()
-
-				s.handler.Handle(conn)
-			}()
-		default:
-			s.logger.Warn("max connections reached", zap.Int("limit", s.maxConnections))
-			_ = conn.Close()
+		if !s.acquireConnection() {
+			s.rejectConnection(conn)
+			continue
 		}
+
+		go s.handleConnection(conn)
 	}
+}
+
+func (s *Server) acquireConnection() bool {
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) handleConnection(conn net.Conn) {
+	defer s.releaseConnection()
+	defer s.recoverPanic()
+
+	s.handler.Handle(conn)
+}
+
+func (s *Server) releaseConnection() {
+	<-s.sem
+}
+
+func (s *Server) recoverPanic() {
+	if r := recover(); r != nil {
+		s.logger.Error("panic while handling connection", zap.Any("panic", r))
+	}
+}
+
+func (s *Server) rejectConnection(conn net.Conn) {
+	s.logger.Warn("max connections reached", zap.Int("limit", s.maxConnections))
+	_ = conn.Close()
 }

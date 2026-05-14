@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -10,32 +11,53 @@ import (
 	"svekla/internal/logging"
 	"svekla/internal/network/tcp"
 	"svekla/internal/storage/engine"
+
+	"go.uber.org/zap"
 )
 
+const defaultConfigPath = "configs/local.yaml"
+
 func main() {
-	cfg, err := config.Load("configs/local.yaml")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: load config:", err)
+	configPath := flag.String("config", defaultConfigPath, "path to yaml config")
+	flag.Parse()
+
+	if err := run(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
+	}
+}
+
+func run(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	maxMessageSize, err := cfg.Network.ParsedMaxMessageSizeBytes()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: parse max_message_size:", err)
-		os.Exit(1)
+		return fmt.Errorf("parse max_message_size: %w", err)
 	}
 
 	logger, err := logging.New(cfg.Logging)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: init logger:", err)
-		os.Exit(1)
+		return fmt.Errorf("init logger: %w", err)
 	}
 	defer func() {
 		_ = logger.Sync()
 	}()
 
-	p := parser.NewParser(logger.Named("parser"))
-	st := engine.NewEngine(logger.Named("engine"))
+	server := buildServer(cfg, maxMessageSize, logger)
+	if err := server.Run(); err != nil {
+		logger.Error("server stopped with error", zap.Error(err))
+		return fmt.Errorf("run server: %w", err)
+	}
+
+	return nil
+}
+
+func buildServer(cfg config.Config, maxMessageSize int, logger *zap.Logger) *tcp.Server {
+	p := parser.NewParser(logger)
+	st := engine.NewEngine(logger)
 	s := service.NewCommandService(st)
 	h := tcp.NewHandler(
 		cfg.Network.IdleTimeout,
@@ -51,9 +73,5 @@ func main() {
 		logger.Named("tcp_server"),
 	)
 
-	if err := server.Run(); err != nil {
-		logger.Error("server stopped with error")
-		fmt.Fprintln(os.Stderr, "ERR:", err)
-		os.Exit(1)
-	}
+	return server
 }

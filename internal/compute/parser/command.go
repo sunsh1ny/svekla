@@ -1,46 +1,34 @@
 package parser
 
+type CommandID int
+
 const (
-	UnknownCommandID = iota
+	UnknownCommandID CommandID = iota
 	SetCommandID
 	GetCommandID
 	DelCommandID
 )
 
-var (
-	UnknownCommand = "UNKNOWN"
-	SetCommand     = "SET"
-	GetCommand     = "GET"
-	DelCommand     = "DEL"
-)
-
-var namesToId = map[string]int{
-	SetCommand: SetCommandID,
-	GetCommand: GetCommandID,
-	DelCommand: DelCommandID,
-}
-
-func commandNameToCommandID(commandName string) int {
-	status, ok := namesToId[commandName]
-	if !ok {
-		return UnknownCommandID
-	}
-
-	return status
-}
-
 const (
-	setCommandArgumentsCount = 2
-	getCommandArgumentsCount = 1
-	delCommandArgumentsCount = 1
+	SetCommand = "SET"
+	GetCommand = "GET"
+	DelCommand = "DEL"
 )
 
-var ArgumentsCount = map[int]int{
-	SetCommandID: setCommandArgumentsCount,
-	GetCommandID: getCommandArgumentsCount,
-	DelCommandID: delCommandArgumentsCount,
+type commandSpec struct {
+	id            CommandID
+	argumentCount int
 }
 
-func commandArgumentsCount(commandID int) int {
-	return ArgumentsCount[commandID]
+func commandByName(name string) (commandSpec, bool) {
+	switch name {
+	case SetCommand:
+		return commandSpec{id: SetCommandID, argumentCount: 2}, true
+	case GetCommand:
+		return commandSpec{id: GetCommandID, argumentCount: 1}, true
+	case DelCommand:
+		return commandSpec{id: DelCommandID, argumentCount: 1}, true
+	default:
+		return commandSpec{}, false
+	}
 }

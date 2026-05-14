@@ -134,3 +134,31 @@ func TestParse(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryCopiesArguments(t *testing.T) {
+	arguments := []string{"key", "value"}
+	query := NewQuery(SetCommandID, arguments)
+
+	arguments[0] = "changed"
+
+	got, ok := query.Argument(0)
+	if !ok {
+		t.Fatal("expected first argument")
+	}
+
+	if got != "key" {
+		t.Fatalf("got %q, want %q", got, "key")
+	}
+
+	copied := query.Arguments()
+	copied[1] = "changed"
+
+	got, ok = query.Argument(1)
+	if !ok {
+		t.Fatal("expected second argument")
+	}
+
+	if got != "value" {
+		t.Fatalf("got %q, want %q", got, "value")
+	}
+}

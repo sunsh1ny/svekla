@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -19,43 +20,61 @@ func main() {
 	addressOverride := flag.String("addr", "", "tcp server address override")
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: load config:", err)
+	if err := run(*configPath, *addressOverride, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
 	}
+}
 
-	address := cfg.Network.Address
-	if *addressOverride != "" {
-		address = *addressOverride
+func run(configPath string, addressOverride string, input io.Reader, output io.Writer) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
+
+	address := serverAddress(cfg, addressOverride)
 
 	maxMessageSize, err := cfg.Network.ParsedMaxMessageSizeBytes()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: parse max message size:", err)
-		os.Exit(1)
+		return fmt.Errorf("parse max message size: %w", err)
 	}
 
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: dial server:", err)
-		os.Exit(1)
+		return fmt.Errorf("dial server: %w", err)
 	}
 	defer conn.Close()
 
-	initialBufSize := maxMessageSize
-	if initialBufSize > 1024 {
-		initialBufSize = 1024
+	return runInteractive(conn, input, output, cfg.Network.IdleTimeout, maxMessageSize)
+}
+
+func serverAddress(cfg config.Config, override string) string {
+	if override != "" {
+		return override
 	}
 
-	stdin := bufio.NewScanner(os.Stdin)
-	stdin.Buffer(make([]byte, 0, initialBufSize), maxMessageSize)
+	return cfg.Network.Address
+}
+
+func runInteractive(
+	conn net.Conn,
+	input io.Reader,
+	output io.Writer,
+	timeout time.Duration,
+	maxMessageSize int,
+) error {
+	maxMessageSize = scannerMessageSizeLimit(maxMessageSize)
+
+	stdin := bufio.NewScanner(input)
+	stdin.Buffer(make([]byte, 0, scannerInitialBufferSize(maxMessageSize)), maxMessageSize)
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
 	for {
-		fmt.Print("> ")
+		if _, err := fmt.Fprint(output, "> "); err != nil {
+			return fmt.Errorf("write prompt: %w", err)
+		}
 
 		if !stdin.Scan() {
 			break
@@ -66,41 +85,74 @@ func main() {
 			continue
 		}
 
-		if cfg.Network.IdleTimeout > 0 {
-			if err := conn.SetWriteDeadline(time.Now().Add(cfg.Network.IdleTimeout)); err != nil {
-				fmt.Fprintln(os.Stderr, "ERR: set write deadline:", err)
-				os.Exit(1)
-			}
-		}
-
-		if _, err := fmt.Fprintln(writer, line); err != nil {
-			fmt.Fprintln(os.Stderr, "ERR: write request:", err)
-			os.Exit(1)
-		}
-
-		if err := writer.Flush(); err != nil {
-			fmt.Fprintln(os.Stderr, "ERR: flush request:", err)
-			os.Exit(1)
-		}
-
-		if cfg.Network.IdleTimeout > 0 {
-			if err := conn.SetReadDeadline(time.Now().Add(cfg.Network.IdleTimeout)); err != nil {
-				fmt.Fprintln(os.Stderr, "ERR: set read deadline:", err)
-				os.Exit(1)
-			}
-		}
-
-		response, err := reader.ReadString('\n')
+		response, err := sendRequest(conn, writer, reader, line, timeout)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "ERR: read response:", err)
-			os.Exit(1)
+			return err
 		}
 
-		fmt.Println(strings.TrimRight(response, "\r\n"))
+		if _, err := fmt.Fprintln(output, response); err != nil {
+			return fmt.Errorf("write response: %w", err)
+		}
 	}
 
 	if err := stdin.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "ERR: read stdin:", err)
-		os.Exit(1)
+		return fmt.Errorf("read stdin: %w", err)
 	}
+
+	return nil
+}
+
+func sendRequest(
+	conn net.Conn,
+	writer *bufio.Writer,
+	reader *bufio.Reader,
+	line string,
+	timeout time.Duration,
+) (string, error) {
+	if err := setDeadline(timeout, conn.SetWriteDeadline); err != nil {
+		return "", fmt.Errorf("set write deadline: %w", err)
+	}
+
+	if _, err := fmt.Fprintln(writer, line); err != nil {
+		return "", fmt.Errorf("write request: %w", err)
+	}
+
+	if err := writer.Flush(); err != nil {
+		return "", fmt.Errorf("flush request: %w", err)
+	}
+
+	if err := setDeadline(timeout, conn.SetReadDeadline); err != nil {
+		return "", fmt.Errorf("set read deadline: %w", err)
+	}
+
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	return strings.TrimRight(response, "\r\n"), nil
+}
+
+func setDeadline(timeout time.Duration, set func(time.Time) error) error {
+	if timeout <= 0 {
+		return nil
+	}
+
+	return set(time.Now().Add(timeout))
+}
+
+func scannerInitialBufferSize(maxMessageSize int) int {
+	if maxMessageSize < 1024 {
+		return maxMessageSize
+	}
+
+	return 1024
+}
+
+func scannerMessageSizeLimit(maxMessageSize int) int {
+	if maxMessageSize <= 0 {
+		return 1024
+	}
+
+	return maxMessageSize
 }

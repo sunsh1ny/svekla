@@ -11,6 +11,10 @@ type Parser struct {
 }
 
 func NewParser(logger *zap.Logger) *Parser {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	logger = logger.Named("parser")
 	logger.Debug("initializing parser")
 
@@ -27,20 +31,15 @@ func (parser *Parser) Parse(raw string) (Query, error) {
 	}
 
 	commandName := fields[0]
-	commandID := commandNameToCommandID(commandName)
-	if commandID == UnknownCommandID {
+	command, ok := commandByName(commandName)
+	if !ok {
 		return Query{}, ErrUnknownCommand
 	}
 
 	arguments := fields[1:]
-	commandArgumentsNum := commandArgumentsCount(commandID)
-
-	if len(arguments) != commandArgumentsNum {
+	if len(arguments) != command.argumentCount {
 		return Query{}, ErrInvalidArgumentsNumber
 	}
 
-	return Query{
-		commandID: commandID,
-		arguments: arguments,
-	}, nil
+	return NewQuery(command.id, arguments), nil
 }
