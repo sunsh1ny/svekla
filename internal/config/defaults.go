@@ -17,5 +17,12 @@ func DefaultConfig() Config {
 			Level:  LogLevelInfo,
 			Output: "stdout",
 		},
+		WAL: WALConfig{
+			Enabled:              false,
+			FlushingBatchSize:    100,
+			FlushingBatchTimeout: 10 * time.Millisecond,
+			SegmentSize:          "10MB",
+			DataDirectory:        "./data/wal",
+		},
 	}
 }

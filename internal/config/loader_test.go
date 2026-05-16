@@ -70,6 +70,13 @@ network:
 logging:
   level: debug
   output: "/tmp/svekla.log"
+
+wal:
+  enabled: true
+  flushing_batch_size: 10
+  flushing_batch_timeout: 20ms
+  segment_size: "2MB"
+  data_directory: "/tmp/svekla-wal"
 `)
 
 	got, err := Load(path)
@@ -90,6 +97,13 @@ logging:
 		Logging: LoggingConfig{
 			Level:  LogLevelDebug,
 			Output: "/tmp/svekla.log",
+		},
+		WAL: WALConfig{
+			Enabled:              true,
+			FlushingBatchSize:    10,
+			FlushingBatchTimeout: 20 * time.Millisecond,
+			SegmentSize:          "2MB",
+			DataDirectory:        "/tmp/svekla-wal",
 		},
 	}
 
@@ -168,6 +182,49 @@ func TestValidate(t *testing.T) {
 			wantErr: ErrInvalidLogLevel,
 		},
 		{
+			name: "invalid wal batch size",
+			cfg: withConfig(func(cfg *Config) {
+				cfg.WAL.Enabled = true
+				cfg.WAL.FlushingBatchSize = 0
+			}),
+			wantErr: ErrInvalidWALBatchSize,
+		},
+		{
+			name: "invalid wal batch timeout",
+			cfg: withConfig(func(cfg *Config) {
+				cfg.WAL.Enabled = true
+				cfg.WAL.FlushingBatchTimeout = 0
+			}),
+			wantErr: ErrInvalidWALBatchTimeout,
+		},
+		{
+			name: "invalid wal segment size",
+			cfg: withConfig(func(cfg *Config) {
+				cfg.WAL.Enabled = true
+				cfg.WAL.SegmentSize = "big"
+			}),
+			wantErr: ErrInvalidWALSegmentSize,
+		},
+		{
+			name: "invalid wal data directory",
+			cfg: withConfig(func(cfg *Config) {
+				cfg.WAL.Enabled = true
+				cfg.WAL.DataDirectory = " "
+			}),
+			wantErr: ErrInvalidWALDataDirectory,
+		},
+		{
+			name: "ignore invalid wal values when disabled",
+			cfg: withConfig(func(cfg *Config) {
+				cfg.WAL.Enabled = false
+				cfg.WAL.FlushingBatchSize = 0
+				cfg.WAL.FlushingBatchTimeout = 0
+				cfg.WAL.SegmentSize = ""
+				cfg.WAL.DataDirectory = ""
+			}),
+			wantErr: nil,
+		},
+		{
 			name:    "valid config",
 			cfg:     DefaultConfig(),
 			wantErr: nil,
@@ -227,6 +284,54 @@ func TestParsedMaxMessageSizeBytes(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := (NetworkConfig{MaxMessageSize: test.input}).ParsedMaxMessageSizeBytes()
+
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("expected error %v, got %v", test.wantErr, err)
+			}
+
+			if test.wantErr != nil {
+				return
+			}
+
+			if got != test.want {
+				t.Fatalf("got %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestParsedWALSegmentSizeBytes(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr error
+	}{
+		{
+			name:  "bytes",
+			input: "512B",
+			want:  512,
+		},
+		{
+			name:  "kilobytes",
+			input: "16KB",
+			want:  16 * 1024,
+		},
+		{
+			name:  "megabytes",
+			input: "3MB",
+			want:  3 * 1024 * 1024,
+		},
+		{
+			name:    "invalid",
+			input:   "3GB",
+			wantErr: ErrInvalidWALSegmentSize,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := (WALConfig{SegmentSize: test.input}).ParsedSegmentSizeBytes()
 
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("expected error %v, got %v", test.wantErr, err)

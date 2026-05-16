@@ -8,3 +8,9 @@ network:
 logging:
   level: "info"
   output: "stdout"
+wal:
+  enabled: false
+  flushing_batch_size: 100
+  flushing_batch_timeout: 10ms
+  segment_size: "10MB"
+  data_directory: "./data/wal"

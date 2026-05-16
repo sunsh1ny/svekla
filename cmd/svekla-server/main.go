@@ -11,6 +11,7 @@ import (
 	"svekla/internal/logging"
 	"svekla/internal/network/tcp"
 	"svekla/internal/storage/engine"
+	"svekla/internal/storage/wal"
 
 	"go.uber.org/zap"
 )
@@ -46,7 +47,11 @@ func run(configPath string) error {
 		_ = logger.Sync()
 	}()
 
-	server := buildServer(cfg, maxMessageSize, logger)
+	server, err := buildServer(cfg, maxMessageSize, logger)
+	if err != nil {
+		return fmt.Errorf("build server: %w", err)
+	}
+
 	if err := server.Run(); err != nil {
 		logger.Error("server stopped with error", zap.Error(err))
 		return fmt.Errorf("run server: %w", err)
@@ -55,10 +60,15 @@ func run(configPath string) error {
 	return nil
 }
 
-func buildServer(cfg config.Config, maxMessageSize int, logger *zap.Logger) *tcp.Server {
+func buildServer(cfg config.Config, maxMessageSize int, logger *zap.Logger) (*tcp.Server, error) {
 	p := parser.NewParser(logger)
 	st := engine.NewEngine(logger)
-	s := service.NewCommandService(st)
+	store, err := buildStore(cfg, st, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	s := service.NewCommandService(store)
 	h := tcp.NewHandler(
 		cfg.Network.IdleTimeout,
 		maxMessageSize,
@@ -73,5 +83,32 @@ func buildServer(cfg config.Config, maxMessageSize int, logger *zap.Logger) *tcp
 		logger.Named("tcp_server"),
 	)
 
-	return server
+	return server, nil
+}
+
+func buildStore(cfg config.Config, st service.Store, logger *zap.Logger) (service.Store, error) {
+	if !cfg.WAL.Enabled {
+		return st, nil
+	}
+
+	segmentSize, err := cfg.WAL.ParsedSegmentSizeBytes()
+	if err != nil {
+		return nil, fmt.Errorf("parse wal segment_size: %w", err)
+	}
+
+	if err := wal.Recover(st, cfg.WAL.DataDirectory); err != nil {
+		return nil, fmt.Errorf("recover wal: %w", err)
+	}
+
+	log, err := wal.Open(wal.Options{
+		BatchSize:     cfg.WAL.FlushingBatchSize,
+		BatchTimeout:  cfg.WAL.FlushingBatchTimeout,
+		SegmentSize:   segmentSize,
+		DataDirectory: cfg.WAL.DataDirectory,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("open wal: %w", err)
+	}
+
+	return wal.NewDurableStore(st, log)
 }

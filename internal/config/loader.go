@@ -38,7 +38,11 @@ func validate(cfg Config) error {
 		return err
 	}
 
-	return validateLogging(cfg.Logging)
+	if err := validateLogging(cfg.Logging); err != nil {
+		return err
+	}
+
+	return validateWAL(cfg.WAL)
 }
 
 func validateEngine(cfg EngineConfig) error {
@@ -94,6 +98,30 @@ func validateAddress(address string) error {
 func validateLogging(cfg LoggingConfig) error {
 	if !isValidLogLevel(cfg.Level) {
 		return ErrInvalidLogLevel
+	}
+
+	return nil
+}
+
+func validateWAL(cfg WALConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	if cfg.FlushingBatchSize <= 0 {
+		return ErrInvalidWALBatchSize
+	}
+
+	if cfg.FlushingBatchTimeout <= 0 {
+		return ErrInvalidWALBatchTimeout
+	}
+
+	if _, err := cfg.ParsedSegmentSizeBytes(); err != nil {
+		return ErrInvalidWALSegmentSize
+	}
+
+	if strings.TrimSpace(cfg.DataDirectory) == "" {
+		return ErrInvalidWALDataDirectory
 	}
 
 	return nil
